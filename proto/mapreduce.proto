@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package mapreduce;
+
+option go_package = "./;proto";
+
+message Task {
+  int32 TaskStage = 1;            //任务的阶段
+	int32 TaskId = 2;               //任务的id
+	int32 ReduceNum = 3;            //reduce个数
+	repeated string Intermediates = 4;   //Reduce时的临时文件
+	string FileName  =5;        //文件名称
+	// time.Time StartTime      //开始时间
+}
+
+message GetTaskArgs {
+}
+
+message GetTaskReply  {
+	Task Task = 1;
+}
+
+// 通知完成任务
+message CompleteTaskArgs {
+	int32 TaskId = 1;  
+	int32 Stage = 2;  
+	repeated string FilePaths = 3; 
+}
+
+message CompleteTaskReply {
+}
+
+service MapReduce {
+  rpc AssignTask (GetTaskArgs) returns (GetTaskReply);
+  rpc CompleteTask(CompleteTaskArgs) returns(CompleteTaskReply);
+}
