@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	pb "mapreduce/proto"
 	"net/rpc"
 	"os"
 	"sort"
 	"strconv"
 	"time"
-	"google.golang.org/grpc"
-	pb "mapreduce/proto"
+
+	"golang.org/x/net/context"
 )
 
 // Map functions return a slice of KeyValue.
@@ -21,16 +22,18 @@ type KeyValue struct {
 }
 
 // main/mrworker.go calls this function.
-func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
+func Worker(ctx context.Context, mapf func(string, string) []KeyValue,
+	reducef func(string, []string) string, client pb.MapReduceClient) {
 	workerStatus := true
 	for workerStatus {
-		task := getTask()
+		args := &pb.GetTaskArgs{}
+		reply, _ := client.AssignTask(ctx, args)
+		task := reply.Task
 		switch task.TaskStage {
 		case Map:
-			mapping(&task, mapf)
+			mapping(ctx, task, mapf, client)
 		case Reduce:
-			reducing(&task, reducef)
+			reducing(ctx, task, reducef, client)
 		case Wait:
 			time.Sleep(5 * time.Second)
 		case Exit:
@@ -40,17 +43,17 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 // rpc function
-func getTask() Task {
-	//GetTask RPC
-	// args := GetTaskArgs{}
-	// reply := GetTaskReply{}
-	// call("Coordinator.AssignTask", &args, &reply)
-	p.
-	return reply.Task
-}
+// func getTask() Task {
+// 	//GetTask RPC
+// 	// args := GetTaskArgs{}
+// 	// reply := GetTaskReply{}
+// 	// call("Coordinator.AssignTask", &args, &reply)
+// 	p.
+// 	return reply.Task
+// }
 
 // map&reduce
-func mapping(t *Task, mapf func(string, string) []KeyValue) {
+func mapping(ctx context.Context, t *pb.Task, mapf func(string, string) []KeyValue, client pb.MapReduceClient) {
 	//解析task
 	content, err := os.ReadFile(t.FileName)
 	if err != nil {
@@ -61,24 +64,25 @@ func mapping(t *Task, mapf func(string, string) []KeyValue) {
 	//将kv散列到不同的文件中
 	buffer := make([][]KeyValue, t.ReduceNum)
 	for _, kv := range kvList {
-		hash := ihash(kv.Key) % t.ReduceNum
+		hash := ihash(kv.Key) % int(t.ReduceNum)
 		buffer[hash] = append(buffer[hash], kv)
 	}
 	//写入临时文件
 	mapOutFiles := make([]string, t.ReduceNum)
 	for i, v := range buffer {
-		mapOutFiles[i] = WriteToTempFile(t.TaskId, i, v)
+		mapOutFiles[i] = WriteToTempFile(int(t.TaskId), i, v)
 	}
 	//发起complete RPC请求
-	args, reply := CompleteTaskArgs{
+	args := &pb.CompleteTaskArgs{
 		TaskId:    t.TaskId,
 		Stage:     t.TaskStage,
 		FilePaths: mapOutFiles,
-	}, CompleteTaskReply{}
-	call("Coordinator.CompleteTask", &args, &reply)
+	}
+	client.CompleteTask(ctx, args)
+	// call("Coordinator.CompleteTask", &args, &reply)
 }
 
-func reducing(t *Task, reducef func(string, []string) string) {
+func reducing(ctx context.Context, t *pb.Task, reducef func(string, []string) string, client pb.MapReduceClient) {
 	//读取文件
 	kvList := ReadFromTempFile(t.Intermediates)
 	//shuffle
@@ -104,14 +108,15 @@ func reducing(t *Task, reducef func(string, []string) string) {
 		}
 	}
 	//写入out文件
-	filePath := WriteToOutFile(t.TaskId, rep)
+	filePath := WriteToOutFile(int(t.TaskId), rep)
 	//发起complete RPC请求
-	args, reply := CompleteTaskArgs{
+	args := &pb.CompleteTaskArgs{
 		TaskId:    t.TaskId,
 		Stage:     t.TaskStage,
 		FilePaths: []string{filePath},
-	}, CompleteTaskReply{}
-	call("Coordinator.CompleteTask", &args, &reply)
+	}
+	client.CompleteTask(ctx, args)
+	// call("Coordinator.CompleteTask", &args, &reply)
 }
 
 func WriteToOutFile(x int, buf []KeyValue) string {
