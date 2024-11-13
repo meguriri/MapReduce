@@ -11,16 +11,12 @@ package main
 //
 
 import (
-	"context"
 	"fmt"
 	"log"
-	"mapreduce/mr"
-	pb "mapreduce/proto"
 	"os"
 	"plugin"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"mapreduce/mr"
 )
 
 func main() {
@@ -33,20 +29,8 @@ func main() {
 	//加载插件，获得MapFunc和ReduceFunc
 	mapf, reducef := loadPlugin(os.Args[1])
 
-	//获取grpc conn
-	conn, err := grpc.NewClient("localhost:1234", grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		log.Fatalf("did not connect: %v", err)
-	}
-	defer conn.Close()
-
-	// 创建 gRPC 客户端
-	client := pb.NewMapReduceClient(conn)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	//worker执行任务
-	mr.Worker(ctx, mapf, reducef, client)
+	mr.Worker(mapf, reducef)
 }
 
 // load the application Map and Reduce functions

@@ -2,20 +2,18 @@ package mr
 
 import (
 	"log"
-	pb "mapreduce/proto"
 	"net"
+	"net/http"
+	"net/rpc"
+	"os"
 	"sync"
 	"time"
-
-	"golang.org/x/net/context"
-	"google.golang.org/grpc"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type Coordinator struct {
-	pb.UnimplementedMapReduceServer
-	taskList      chan *pb.Task
-	taskIndex     map[int64]*pb.Task
+	// Your definitions here.
+	taskList      chan *Task
+	taskIndex     map[int]*Task
 	status        int
 	reduceNum     int
 	files         []string
@@ -30,8 +28,8 @@ type Coordinator struct {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// Your code here.
 	c := Coordinator{
-		taskList:      make(chan *pb.Task, max(len(files), nReduce)),
-		taskIndex:     make(map[int64]*pb.Task),
+		taskList:      make(chan *Task, max(len(files), nReduce)),
+		taskIndex:     make(map[int]*Task),
 		status:        Map,
 		reduceNum:     nReduce,
 		files:         files,
@@ -54,8 +52,8 @@ func (c *Coordinator) CheckCrash() {
 			break
 		}
 		for i := range c.taskIndex {
-			if ((c.taskIndex[i].TaskStage == Map) || (c.taskIndex[i].TaskStage == Reduce)) && (time.Unix(c.taskIndex[i].StartTime.GetSeconds(), 0) != time.Time{}) && (time.Since(time.Unix(c.taskIndex[i].StartTime.GetSeconds(), 0)).Seconds() >= 10) {
-				c.taskIndex[i].StartTime = timestamppb.New(time.Time{})
+			if ((c.taskIndex[i].TaskStage == Map) || (c.taskIndex[i].TaskStage == Reduce)) && (c.taskIndex[i].StartTime != time.Time{}) && (time.Since(c.taskIndex[i].StartTime).Seconds() >= 10) {
+				c.taskIndex[i].StartTime = time.Time{}
 				if c.status == Map {
 					c.taskIndex[i].TaskStage = Map
 				} else if c.status == Reduce {
@@ -70,22 +68,21 @@ func (c *Coordinator) CheckCrash() {
 }
 
 // Your code here -- RPC handlers for the worker to call.
-func (c *Coordinator) AssignTask(ctx context.Context, args *pb.GetTaskArgs) (*pb.GetTaskReply, error) {
+func (c *Coordinator) AssignTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	c.lock.Lock()
-	reply := &pb.GetTaskReply{}
 	if len(c.taskList) > 0 {
-		reply.Task = <-c.taskList
-		c.taskIndex[reply.Task.TaskId].StartTime = timestamppb.New(time.Now())
+		reply.Task = *<-c.taskList
+		c.taskIndex[reply.Task.TaskId].StartTime = time.Now()
 	} else {
 		if c.status == Exit {
-			reply.Task = &pb.Task{
+			reply.Task = Task{
 				TaskStage: Exit,
 				TaskId:    -1,
 				ReduceNum: -1,
 				FileName:  "",
 			}
 		} else {
-			reply.Task = &pb.Task{
+			reply.Task = Task{
 				TaskStage: Wait,
 				TaskId:    -1,
 				ReduceNum: -1,
@@ -94,16 +91,15 @@ func (c *Coordinator) AssignTask(ctx context.Context, args *pb.GetTaskArgs) (*pb
 		}
 	}
 	c.lock.Unlock()
-	return reply, nil
+	return nil
 }
 
-func (c *Coordinator) CompleteTask(ctx context.Context, args *pb.CompleteTaskArgs) (*pb.CompleteTaskReply, error) {
-	id, stage, files := args.TaskId, int(args.Stage), args.FilePaths
-	reply := &pb.CompleteTaskReply{}
+func (c *Coordinator) CompleteTask(args *CompleteTaskArgs, reply *CompleteTaskReply) error {
+	id, stage, files := args.TaskId, args.Stage, args.FilePaths
 	c.lock.Lock()
 	if stage != c.status || c.taskIndex[id].TaskStage == MapComplete || c.taskIndex[id].TaskStage == ReduceComplete {
 		c.lock.Unlock()
-		return reply, nil
+		return nil
 	}
 	if stage == Map {
 		c.taskIndex[id].TaskStage = MapComplete
@@ -116,7 +112,7 @@ func (c *Coordinator) CompleteTask(ctx context.Context, args *pb.CompleteTaskArg
 	}
 	c.lock.Unlock()
 	go c.CheckStage(stage)
-	return reply, nil
+	return nil
 }
 
 func (c *Coordinator) CheckStage(stage int) {
@@ -133,6 +129,7 @@ func (c *Coordinator) CheckStage(stage int) {
 func (c *Coordinator) isAllComplete() bool {
 	for i := range c.taskIndex {
 		if c.taskIndex[i].TaskStage == Map || c.taskIndex[i].TaskStage == Reduce {
+
 			return false
 		}
 	}
@@ -144,52 +141,47 @@ func (c *Coordinator) CreateMapTask() {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	for i, f := range c.files {
-		task := pb.Task{
+		task := Task{
 			TaskStage:     Map,
-			TaskId:        int64(i),
-			ReduceNum:     int64(c.reduceNum),
+			TaskId:        i,
+			ReduceNum:     c.reduceNum,
 			Intermediates: nil,
 			FileName:      f,
-			StartTime:     timestamppb.New(time.Time{}),
+			StartTime:     time.Time{},
 		}
 		c.taskList <- &task
-		c.taskIndex[int64(i)] = &task
+		c.taskIndex[i] = &task
 	}
 }
 
 func (c *Coordinator) CreateReduceTask() {
-	c.taskIndex = make(map[int64]*pb.Task)
+	c.taskIndex = make(map[int]*Task)
 	for i, files := range c.intermediates {
-		task := pb.Task{
+		task := Task{
 			TaskStage:     Reduce,
-			TaskId:        int64(i),
-			ReduceNum:     int64(c.reduceNum),
+			TaskId:        i,
+			ReduceNum:     c.reduceNum,
 			Intermediates: files,
 			FileName:      "",
-			StartTime:     timestamppb.New(time.Time{}),
+			StartTime:     time.Time{},
 		}
 		c.taskList <- &task
-		c.taskIndex[int64(i)] = &task
+		c.taskIndex[i] = &task
 	}
 }
 
 // start a thread that listens for RPCs from worker.go
 func (c *Coordinator) server() {
-	l, e := net.Listen("tcp", ":1234")
+	rpc.Register(c)
+	rpc.HandleHTTP()
+	sockname := coordinatorSock()
+	os.Remove(sockname)
+	//l, e := net.Listen("tcp", ":1234")
+	l, e := net.Listen("unix", sockname)
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-
-	server := grpc.NewServer()
-	pb.RegisterMapReduceServer(server, c)
-
-	// rpc.Register(c)
-	// rpc.HandleHTTP()
-	// sockname := coordinatorSock()
-	// os.Remove(sockname)
-	// l, e := net.Listen("unix", sockname)
-	// go http.Serve(l, nil)
-	server.Serve(l)
+	go http.Serve(l, nil)
 }
 
 // main/mrcoordinator.go calls Done() periodically to find out
